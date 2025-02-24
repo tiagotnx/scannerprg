@@ -16,24 +16,35 @@ import (
 	"github.com/cheggaaa/pb/v3"
 )
 
-// DeclarationInfo representa as informações de uma declaração de função/procedure.
-type DeclarationInfo struct {
-	Name string
-	File string
-}
-
 // FunctionDeclaration representa uma função ou procedure encontrada.
 type FunctionDeclaration struct {
 	Name       string
 	File       string
 	Static     bool
-	UsageCount int64 // Contador de uso (inicializado com 1 para a declaração)
+	UsageCount int64 // Inicia em 1 para contabilizar a declaração
+}
+
+// DeclarationInfo representa os dados para log (nome e arquivo).
+type DeclarationInfo struct {
+	Name string
+	File string
+}
+
+// Statistics armazena estatísticas do processamento.
+type Statistics struct {
+	TotalGlobal           int
+	UnusedGlobal          int
+	TotalStatic           int
+	UnusedStatic          int
+	TotalProcessingTime   time.Duration
+	GlobalUsagePercentage float64
+	StaticUsagePercentage float64
 }
 
 var (
 	globalFunctions = make(map[string]*FunctionDeclaration)
 	staticFunctions = make(map[string]map[string]*FunctionDeclaration)
-	declMutex       sync.Mutex // Protege as alterações nos mapas durante a fase de declarações
+	declMutex       sync.Mutex // Protege os mapas durante as declarações
 )
 
 // Regex para identificar declarações de função/procedure.
@@ -54,8 +65,7 @@ func SearchPRGFiles(root string) ([]string, error) {
 	return prgFiles, err
 }
 
-// ProcessDeclarationsConcurrently processa a extração das declarações de forma concorrente.
-// A função agora recebe um ponteiro para a progress bar e chama bar.Increment() após processar cada arquivo.
+// ProcessDeclarationsConcurrently processa as declarações de forma concorrente, atualizando a barra de progresso.
 func ProcessDeclarationsConcurrently(files []string, bar *pb.ProgressBar) {
 	numWorkers := runtime.NumCPU()
 	fileCh := make(chan string, len(files))
@@ -73,7 +83,6 @@ func ProcessDeclarationsConcurrently(files []string, bar *pb.ProgressBar) {
 	for i := 0; i < numWorkers; i++ {
 		go worker()
 	}
-
 	for _, file := range files {
 		fileCh <- file
 	}
@@ -106,7 +115,7 @@ func processFileForDeclarations(file string) {
 				}
 			} else {
 				if gf, exists := globalFunctions[name]; exists {
-					gf.UsageCount++ // Caso haja declarações duplicadas
+					gf.UsageCount++ // Em caso de declarações duplicadas
 				} else {
 					globalFunctions[name] = &FunctionDeclaration{
 						Name:       name,
@@ -121,7 +130,7 @@ func processFileForDeclarations(file string) {
 	}
 }
 
-// ProcessUsageConcurrently processa a verificação de uso de forma concorrente e atualiza a progress bar.
+// ProcessUsageConcurrently processa a verificação de uso de forma concorrente, atualizando a barra de progresso.
 func ProcessUsageConcurrently(files []string, bar *pb.ProgressBar) {
 	numWorkers := runtime.NumCPU()
 	fileCh := make(chan string, len(files))
@@ -168,7 +177,7 @@ func processFileForUsage(file string) {
 		lowerName := strings.ToLower(decl.Name)
 		count := freq[lowerName]
 		if file == decl.File && count > 0 {
-			count--
+			count-- // Desconta a declaração
 		}
 		if count > 0 {
 			atomic.AddInt64(&decl.UsageCount, int64(count))
@@ -181,7 +190,7 @@ func processFileForUsage(file string) {
 			lowerName := strings.ToLower(decl.Name)
 			count := freq[lowerName]
 			if count > 0 {
-				count--
+				count-- // Desconta a declaração
 			}
 			if count > 0 {
 				atomic.AddInt64(&decl.UsageCount, int64(count))
@@ -190,7 +199,7 @@ func processFileForUsage(file string) {
 	}
 }
 
-// GetUnusedDeclarations retorna slices de DeclarationInfo para funções/procedures não utilizadas.
+// GetUnusedDeclarations retorna slices com as declarações não utilizadas.
 func GetUnusedDeclarations() (unusedGlobal []DeclarationInfo, unusedStatic []DeclarationInfo) {
 	for _, decl := range globalFunctions {
 		if atomic.LoadInt64(&decl.UsageCount) <= 1 {
@@ -213,16 +222,58 @@ func GetUnusedDeclarations() (unusedGlobal []DeclarationInfo, unusedStatic []Dec
 	return
 }
 
-// GenerateLog gera um arquivo de log com as funções/procedures não utilizadas,
-// agrupadas por diretório e por arquivo, com um cabeçalho e resumo.
-func GenerateLog(outputPath string, unusedGlobal []DeclarationInfo, unusedStatic []DeclarationInfo) error {
+// CalculateStatistics calcula estatísticas com base nas declarações e no tempo de processamento.
+func CalculateStatistics(totalProcessingTime time.Duration) Statistics {
+	totalGlobal := len(globalFunctions)
+	unusedGlobalCount := 0
+	for _, decl := range globalFunctions {
+		if decl.UsageCount <= 1 {
+			unusedGlobalCount++
+		}
+	}
+
+	totalStatic := 0
+	unusedStaticCount := 0
+	for _, funcs := range staticFunctions {
+		for _, decl := range funcs {
+			totalStatic++
+			if decl.UsageCount <= 1 {
+				unusedStaticCount++
+			}
+		}
+	}
+
+	globalUsed := totalGlobal - unusedGlobalCount
+	staticUsed := totalStatic - unusedStaticCount
+
+	var globalUsagePercentage, staticUsagePercentage float64
+	if totalGlobal > 0 {
+		globalUsagePercentage = float64(globalUsed) / float64(totalGlobal) * 100.0
+	}
+	if totalStatic > 0 {
+		staticUsagePercentage = float64(staticUsed) / float64(totalStatic) * 100.0
+	}
+
+	return Statistics{
+		TotalGlobal:           totalGlobal,
+		UnusedGlobal:          unusedGlobalCount,
+		TotalStatic:           totalStatic,
+		UnusedStatic:          unusedStaticCount,
+		TotalProcessingTime:   totalProcessingTime,
+		GlobalUsagePercentage: globalUsagePercentage,
+		StaticUsagePercentage: staticUsagePercentage,
+	}
+}
+
+// GenerateLog gera um log organizado com agrupamento por diretório/arquivo e inclui estatísticas.
+func GenerateLog(outputPath string, unusedGlobal []DeclarationInfo, unusedStatic []DeclarationInfo, stats Statistics) error {
 	logFile, err := os.Create(outputPath)
 	if err != nil {
 		return err
 	}
 	defer logFile.Close()
 
-	// Cabeçalho com data e título
+	// Cabeçalho
 	now := time.Now().Format("2006-01-02 15:04:05")
 	header := fmt.Sprintf("========================================\n"+
 		"   Log de Funções/Procedures Não Utilizadas\n"+
@@ -230,7 +281,17 @@ func GenerateLog(outputPath string, unusedGlobal []DeclarationInfo, unusedStatic
 		"========================================\n\n", now)
 	logFile.WriteString(header)
 
-	// Agrupa as declarações globais por diretório e arquivo
+	// Resumo de estatísticas
+	summary := fmt.Sprintf("Estatísticas:\n"+
+		"Tempo Total de Processamento: %s\n"+
+		"Total de Funções Globais: %d, Utilizadas: %d (%.2f%%), Não Utilizadas: %d\n"+
+		"Total de Funções Estáticas: %d, Utilizadas: %d (%.2f%%), Não Utilizadas: %d\n\n",
+		stats.TotalProcessingTime,
+		stats.TotalGlobal, stats.TotalGlobal-stats.UnusedGlobal, stats.GlobalUsagePercentage, stats.UnusedGlobal,
+		stats.TotalStatic, stats.TotalStatic-stats.UnusedStatic, stats.StaticUsagePercentage, stats.UnusedStatic)
+	logFile.WriteString(summary)
+
+	// Agrupamento de declarações globais por diretório e arquivo
 	globalGroup := make(map[string]map[string][]string)
 	for _, decl := range unusedGlobal {
 		dir := filepath.Dir(decl.File)
@@ -241,11 +302,12 @@ func GenerateLog(outputPath string, unusedGlobal []DeclarationInfo, unusedStatic
 		globalGroup[dir][fileBase] = append(globalGroup[dir][fileBase], decl.Name)
 	}
 
-	// Seção de funções/procedures globais não utilizadas
 	logFile.WriteString(fmt.Sprintf("Funções/Procedures Globais Não Utilizadas (%d):\n", len(unusedGlobal)))
-	logFile.WriteString("############################################################\n")
+	logFile.WriteString("============================================================\n")
 	for dir, files := range globalGroup {
+		logFile.WriteString("------------------------------------------------------------\n")
 		logFile.WriteString(fmt.Sprintf("Diretório: %s\n", dir))
+		logFile.WriteString("------------------------------------------------------------\n")
 		for file, names := range files {
 			logFile.WriteString(fmt.Sprintf("  Arquivo: %s\n", file))
 			for _, name := range names {
@@ -256,7 +318,7 @@ func GenerateLog(outputPath string, unusedGlobal []DeclarationInfo, unusedStatic
 	}
 	logFile.WriteString("\n")
 
-	// Agrupa as declarações estáticas por diretório e arquivo
+	// Agrupamento de declarações estáticas por diretório e arquivo
 	staticGroup := make(map[string]map[string][]string)
 	for _, decl := range unusedStatic {
 		dir := filepath.Dir(decl.File)
@@ -267,13 +329,12 @@ func GenerateLog(outputPath string, unusedGlobal []DeclarationInfo, unusedStatic
 		staticGroup[dir][fileBase] = append(staticGroup[dir][fileBase], decl.Name)
 	}
 
-	// Seção de funções/procedures estáticas não utilizadas
 	logFile.WriteString(fmt.Sprintf("Funções/Procedures Estáticas Não Utilizadas (%d):\n", len(unusedStatic)))
-	logFile.WriteString("############################################################\n")
+	logFile.WriteString("============================================================\n")
 	for dir, files := range staticGroup {
+		logFile.WriteString("------------------------------------------------------------\n")
 		logFile.WriteString(fmt.Sprintf("Diretório: %s\n", dir))
 		logFile.WriteString("------------------------------------------------------------\n")
-
 		for file, names := range files {
 			logFile.WriteString(fmt.Sprintf("  Arquivo: %s\n", file))
 			for _, name := range names {
@@ -282,11 +343,6 @@ func GenerateLog(outputPath string, unusedGlobal []DeclarationInfo, unusedStatic
 		}
 		logFile.WriteString("\n")
 	}
-
-	// Resumo final
-	logFile.WriteString("\nResumo:\n")
-	logFile.WriteString(fmt.Sprintf("Total de declarações globais não utilizadas: %d\n", len(unusedGlobal)))
-	logFile.WriteString(fmt.Sprintf("Total de declarações estáticas não utilizadas: %d\n", len(unusedStatic)))
 
 	return nil
 }

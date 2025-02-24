@@ -4,16 +4,30 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
+	"time"
 
 	"github.com/cheggaaa/pb/v3"
 	"github.com/tiagotnx/scannerprg/internal/scanner"
 )
 
 func main() {
-	// Parâmetros da CLI
-	dirPtr := flag.String("dir", ".", "diretório (ou unidade) a ser percorrido")
-	outputPtr := flag.String("out", "unused.log", "arquivo de log de saída")
+	// Configuração via variáveis de ambiente
+	dirDefault := "."
+	if envDir := os.Getenv("PRGSCANNER_DIR"); envDir != "" {
+		dirDefault = envDir
+	}
+	outDefault := "unused.log"
+	if envOut := os.Getenv("PRGSCANNER_OUT"); envOut != "" {
+		outDefault = envOut
+	}
+
+	// Flags com valores padrão (possivelmente sobrescritos pelas variáveis de ambiente)
+	dirPtr := flag.String("dir", dirDefault, "diretório (ou unidade) a ser percorrido")
+	outputPtr := flag.String("out", outDefault, "arquivo de log de saída")
 	flag.Parse()
+
+	startTime := time.Now()
 
 	// Etapa 1: Busca dos arquivos .prg
 	fmt.Println("Etapa 1: Buscando arquivos .prg...")
@@ -34,10 +48,16 @@ func main() {
 	scanner.ProcessUsageConcurrently(prgFiles, barUsage)
 	barUsage.Finish()
 
-	// Etapa 4: Geração do arquivo de log com os resultados
+	// Calcula as estatísticas do processamento
+	totalTime := time.Since(startTime)
+	stats := scanner.CalculateStatistics(totalTime)
+
+	// Obtém as declarações não utilizadas
 	unusedGlobal, unusedStatic := scanner.GetUnusedDeclarations()
+
+	// Etapa 4: Geração do log com estatísticas e agrupamentos
 	fmt.Println("Etapa 4: Gerando arquivo de log...")
-	err = scanner.GenerateLog(*outputPtr, unusedGlobal, unusedStatic)
+	err = scanner.GenerateLog(*outputPtr, unusedGlobal, unusedStatic, stats)
 	if err != nil {
 		log.Fatalf("Erro ao gerar arquivo de log: %v", err)
 	}
