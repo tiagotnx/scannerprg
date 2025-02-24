@@ -58,7 +58,7 @@ Após compilar, execute o programa da seguinte forma:
 
 ## ⚙️ configuração via variáveis de ambiente
 
-O PRGScanner pode ser configurado usando um arquivo `config.json`. Exemplo:
+O PRGScanner pode ser configurado usando variáveis de ambiente. Exemplo:
 
 ```
 PRGSCANNER_DIR  "/projetos"
